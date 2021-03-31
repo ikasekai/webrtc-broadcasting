@@ -1,0 +1,12 @@
+{
+  "dependencies": {
+    "cookie-parser": "^1.4.5",
+    "express": "^4.17.1",
+    "log4js": "^6.3.0",
+    "rails-cookie-parser": "^0.0.5",
+    "simple-peer": "^9.9.3",
+    "simple-signal-client": "^3.0.0",
+    "simple-signal-server": "^3.0.0",
+    "socket.io": "^3.1.1"
+  }
+}

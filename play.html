@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="ja">
+    <head>
+    <meta charset="UTF-8">
+    <title>webRTC</title>
+    </head>
+<body>
+    <style>
+        *{
+            margin:0;
+            padding:0;
+        }
+        html{
+            width:100%;
+            height:100%;
+        }
+        body{
+            width:100%;
+            height:100%;
+            background-color:#696969;
+        }
+        #video{
+            width:100%;
+            height:100%;
+            display: none;
+        }
+        #statusConnection{
+            position:absolute;
+            top:0;
+            left:0;
+            font-size:8px;
+            color:#ff4500;
+        }
+        #btn_start{
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            z-index:10;
+            font-size:30px;
+            padding:10px;
+            
+            -webkit-transform: translate(-50%, -50%);
+            transform: translate(-50%, -50%);
+        }
+    </style>
+    <div id="statusConnection">未接続</div>
+    <input type="button" onclick="document.querySelector('#video').play();document.querySelector('#btn_start').style.display='none'" value="▶　再生"  id="btn_start" disabled>
+
+
+    <video id="video" controls></video>
+    <script type="text/javascript" src="/socket.io/socket.io.js"></script>
+    <script src="https://stream.ikasekai.com/js/simplepeer.min.js"></script>
+    <script>
+    var initiator = location.hash === '#1';
+    var socketReady = false;
+    var socket = io.connect();
+    var peerClient = null;
+    var broadcastStream = null;
+    var intervalConnection = null;
+    var url = new URL(document.location.href)
+    const listPeerConnection = {};
+
+    socket.emit("client_to_server_join", {room : getRoomName() });
+    socket.emit("client_to_server_personal", {value : name});
+
+    // socket: channel connected
+    socket.on('connect', onOpened)
+          .on('server_to_client', onMessage);
+
+    function getRoomName() { // たとえば、 URLに  ?roomname  とする
+        
+        var args = url.pathname.split('/');
+        console.log(args)
+        if (args.length > 1) {
+            var room = args[2];
+            if (room != "") {
+                return 'room' + room;
+            }
+        }
+        return "_defaultroom";
+    }
+
+    function onOpened(evt) {
+        console.log('socket opened.');
+        socketReady = true;
+        var roomname = getRoomName(); // 会議室名を取得する
+        socket.emit('enter', roomname);
+    }
+
+    function onMessage(evt) {
+        console.log(evt);
+        //document.querySelector('#outgoing').textContent = JSON.stringify(evt)
+        if(initiator){
+            if(evt.data.type=="call"){
+                if(broadcastStream){
+                    socket.emit("client_to_server_to", evt.clientId, {type:'received'});
+                    listPeerConnection[evt.clientId] = createPeer(evt.clientId);
+                }
+            }else if(evt.data.type=="answer"){
+                listPeerConnection[evt.clientId].signal(evt.data)
+            }else if(evt.data.type=="leave"){
+                console.log('disconnect:' + evt.clientId);
+                delete listPeerConnection[evt.clientId]
+            }
+        }else{
+            if(evt.data.type=="received"){
+                clearInterval(intervalConnection);
+                setStatus('▶ 接続先検知');
+            }else if(evt.data.type=="offer"){
+                setStatus('▶ 開通処理開始');
+                peerClient.signal(evt.data)
+            }
+        }
+    }
+
+    function startCallConnection(){
+        setStatus('-接続処理開始...');
+        let text = '▲接続中...'
+        intervalConnection = setInterval(function(){
+            if(socketReady){
+                text += '.'
+                setStatus(text)
+                callConnection();
+            }
+        },1000
+        );
+    }
+
+    function callConnection(){
+        if(peerClient == null){
+            peerClient = createPeer();
+
+            peerClient.on('error', err => {
+                console.log('reset');
+                setStatus('X 接続断 再接続を試みます');
+                peerClient = null;
+                startCallConnection();
+            })
+        }
+        socket.emit("client_to_server_broadcast", {type:'call',clientId:socket.id});
+    }
+    function gotMedia(stream){
+        broadcastStream = stream;
+        var video = document.querySelector('#video')
+        video.style.display = 'block';
+        if ('srcObject' in video) {
+            video.srcObject = stream
+        } else {
+            video.src = window.URL.createObjectURL(stream) // for older browsers
+        }
+        video.muted = true;
+        video.play()
+    }
+    if(initiator){
+        navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false
+        }).then(gotMedia).catch(() => {})
+
+    }else{
+
+    }
+
+    function createPeer(socketSendTo){
+        let param = {
+            initiator: initiator,
+            trickle: false,
+            config:{iceServers: [{ urls: 'stun:stream.ikasekai.com:3478' },]}
+        }
+        if(broadcastStream){
+            param.stream = broadcastStream;
+        }
+        let peerClient = new SimplePeer(param)
+
+        peerClient.on('error', err => {
+            console.log('error', err)
+            //delete peerClient;
+            //startCallConnection();
+        })
+
+        peerClient.on('signal', data => {
+            console.log('SIGNAL', JSON.stringify(data));
+            if(socketSendTo){
+                // 特定socketに送信
+                socket.emit("client_to_server_to", socketSendTo, data);
+            }else{
+                // Room全体に送信
+                socket.emit("client_to_server_broadcast", data);
+            }
+            
+            //socket.to(clientId).emit('client_to_server_broadcast', data);
+            //document.querySelector('#outgoing').textContent = JSON.stringify(data)
+        })
+
+        
+
+
+        peerClient.on('connect', () => {
+            console.log('CONNECT')
+            setStatusConnect();
+            peerClient.send('whatever' + Math.random())
+        })
+
+        peerClient.on('data', data => {
+            console.log('data: ' + data)
+        })
+        
+        if(!initiator){
+            peerClient.on('stream', stream => {
+                // got remote video stream, now let's show it in a video tag
+                var video = document.querySelector('#video')
+
+                if ('srcObject' in video) {
+                    video.srcObject = stream
+                } else {
+                    video.src = window.URL.createObjectURL(stream) // for older browsers
+                }
+                video.addEventListener('canplay', function() {
+                    video.style.display = 'block';
+                    document.querySelector('#btn_start').disabled = false;
+                    video.play()
+                });
+
+            })
+        }
+
+
+
+        return peerClient;
+    }
+
+    function setStatusConnect(){
+        setStatus('●接続済み');
+        
+    }
+    function setStatus(text){
+        document.querySelector('#statusConnection').innerHTML = text;
+    }
+
+
+
+    startCallConnection();
+/*
+    var peer1 = new SimplePeer({ initiator: true })
+    var peer2 = new SimplePeer()
+
+    peer1.on('signal', data => {
+    // when peer1 has signaling data, give it to peer2 somehow
+        peer2.signal(data)
+    })
+
+    peer2.on('signal', data => {
+        // when peer2 has signaling data, give it to peer1 somehow
+        peer1.signal(data)
+    })
+
+    peer1.on('connect', () => {
+        // wait for 'connect' event before using the data channel
+        peer1.send('hey peer2, how is it going?')
+    })
+
+    peer2.on('data', data => {
+        // got a data channel message
+        console.log('got a message from peer1: ' + data)
+    })
+*/
+
+
+    </script>
+  </body>
+</html>

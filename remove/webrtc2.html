@@ -1,0 +1,34 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebRTC 4</title>  
+</head>
+<body>
+	
+	<script type="text/javascript" src="https://stream.ikasekai.com/js/simple-signal-client.min.js"></script>
+	<script type="text/javascript" src="/socket.io/socket.io.js"></script>
+<script>
+	var socket = io.connect();
+	var signalClient = new SimpleSignalClient(socket) // Uses an existing socket.io-client instance
+
+signalClient.on('discover', async (allIDs) => {
+	console.log(allIDs);
+  const id = await promptUserForID(allIDs) // Have the user choose an ID to connect to
+  const { peer } = await signalClient.connect(id) // connect to target client
+  peer // this is a fully-signaled simple-peer object (initiator side)
+})
+
+signalClient.on('request', async (request) => {
+  const { peer } = await request.accept() // Accept the incoming request
+  peer // this is a fully-signaled simple-peer object (non-initiator side)
+})
+
+signalClient.discover();
+
+function promptUserForID(allIDs){
+	return window.prompt(allIDs, allIDs[0]);;
+}
+</script>
+</body>
+</html>

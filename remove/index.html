@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="ja">
+    <head>
+    <meta charset="UTF-8">
+    <title>webRTC</title>
+    </head>
+<body>
+    <style>
+      #outgoing {
+        width: 600px;
+        word-wrap: break-word;
+        white-space: normal;
+      }
+    </style>
+    <b id="statusConnection">未接続</b>
+    <input type="button" onclick="startCallConnection()" value="接続開始" id="btn_start">
+    <form>
+        <textarea id="message"></textarea>
+        <button type="submit" disabled id="sendButton">submit</button>
+    </form>
+    <ul id="chat"></ul>
+    <!--
+    <form>
+      <textarea id="incoming"></textarea>
+      <button type="submit">submit</button>
+    </form>
+    <pre id="outgoing"></pre>
+    -->
+    <video id="video"></video>
+    <script type="text/javascript" src="/socket.io/socket.io.js"></script>
+    <script src="https://stream.ikasekai.com/js/simplepeer.min.js"></script>
+    <script>
+    var initiator = location.hash === '#1';
+    var socketReady = false;
+    var socket = io.connect();
+    var peerClient = null;
+    var broadcastStream = null;
+    var intervalConnection = null;
+    const listPeerConnection = {};
+
+    socket.emit("client_to_server_join", {room : getRoomName() });
+    socket.emit("client_to_server_personal", {value : name});
+
+    // socket: channel connected
+    socket.on('connect', onOpened)
+          .on('server_to_client', onMessage);
+
+    function getRoomName() { // たとえば、 URLに  ?roomname  とする
+        var url = document.location.href;
+        var args = url.split('?');
+        if (args.length > 1) {
+            var room = args[1];
+            if (room != "") {
+            return room;
+            }
+        }
+        return "_defaultroom";
+    }
+
+    function onOpened(evt) {
+        console.log('socket opened.');
+        socketReady = true;
+        var roomname = getRoomName(); // 会議室名を取得する
+        socket.emit('enter', roomname);
+    }
+
+    function onMessage(evt) {
+        console.log(evt);
+        //document.querySelector('#outgoing').textContent = JSON.stringify(evt)
+        if(initiator){
+            if(evt.data.type=="call"){
+                
+                socket.emit("client_to_server_to", evt.clientId, {type:'received'});
+                listPeerConnection[evt.clientId] = createPeer(evt.clientId);
+            }else if(evt.data.type=="answer"){
+                listPeerConnection[evt.clientId].signal(evt.data)
+            }else if(evt.data.type=="leave"){
+                console.log('disconnect:' + evt.clientId);
+                delete listPeerConnection[evt.clientId]
+            }
+        }else{
+            if(evt.data.type=="received"){
+                clearInterval(intervalConnection);
+            }else if(evt.data.type=="offer"){
+                peerClient.signal(evt.data)
+            }
+        }
+    }
+
+    function startCallConnection(){
+        
+        document.querySelector('#btn_start').style.display = 'none'
+        intervalConnection = setInterval(function(){
+            if(socketReady){
+                console.log('try connect');
+                document.querySelector('#statusConnection').innerHTML = '▲接続中...'
+                callConnection();
+            }
+        },3000
+        );
+    }
+    function callConnection(){
+        if(peerClient == null){
+            peerClient = createPeer();
+        }
+        socket.emit("client_to_server_broadcast", {type:'call',clientId:socket.id});
+    }
+    function gotMedia(stream){
+        broadcastStream = stream;
+        var video = document.querySelector('#video')
+
+        if ('srcObject' in video) {
+            video.srcObject = stream
+        } else {
+            video.src = window.URL.createObjectURL(stream) // for older browsers
+        }
+
+        video.play()
+    }
+    if(initiator){
+        navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false
+        }).then(gotMedia).catch(() => {})
+
+    }else{
+
+    }
+
+    function createPeer(socketSendTo){
+        let param = {
+            initiator: initiator,
+            trickle: false,
+            config:{iceServers: [{ urls: 'stun:stream.ikasekai.com:3478' },]}
+        }
+        if(broadcastStream){
+            param.stream = broadcastStream;
+        }
+        let peerClient = new SimplePeer(param)
+
+        peerClient.on('error', err => console.log('error', err))
+
+        peerClient.on('signal', data => {
+            console.log('SIGNAL', JSON.stringify(data));
+            if(socketSendTo){
+                // 特定socketに送信
+                socket.emit("client_to_server_to", socketSendTo, data);
+            }else{
+                // Room全体に送信
+                socket.emit("client_to_server_broadcast", data);
+            }
+            
+            //socket.to(clientId).emit('client_to_server_broadcast', data);
+            //document.querySelector('#outgoing').textContent = JSON.stringify(data)
+        })
+
+        
+
+
+        peerClient.on('connect', () => {
+            console.log('CONNECT')
+            setStatusConnect();
+            peerClient.send('whatever' + Math.random())
+        })
+
+        peerClient.on('data', data => {
+            chatAdd(data);
+            console.log('data: ' + data)
+        })
+        
+        if(!initiator){
+            peerClient.on('stream', stream => {
+                // got remote video stream, now let's show it in a video tag
+                var video = document.querySelector('#video')
+
+                if ('srcObject' in video) {
+                    video.srcObject = stream
+                } else {
+                    video.src = window.URL.createObjectURL(stream) // for older browsers
+                }
+                video.addEventListener('canplay', function() {
+                    video.play()
+                });
+
+            })
+        }
+
+
+
+        return peerClient;
+    }
+
+    function setStatusConnect(){
+        
+        document.querySelector('#statusConnection').innerHTML = '●接続済み'
+        document.querySelector('#sendButton').disabled = false
+    }
+    function chatAdd(text){
+        let li =  document.createElement('li');
+        li.innerHTML = text;
+        document.querySelector('#chat').appendChild(li);
+    }
+
+
+
+
+    document.querySelector('form').addEventListener('submit', ev => {
+            ev.preventDefault();
+            console.log('send');
+            let message = document.querySelector('#message').value;
+            chatAdd(message);
+
+            if(initiator){
+                for (let key in listPeerConnection) {
+                    console.log(key)
+                    if(listPeerConnection[key]){
+                        listPeerConnection[key].send(message)
+                    }else{
+                        delete listPeerConnection[key]
+                    }
+                }
+            }else{
+                peerClient.send(message)
+            }
+        })
+        
+
+/*
+    var peer1 = new SimplePeer({ initiator: true })
+    var peer2 = new SimplePeer()
+
+    peer1.on('signal', data => {
+    // when peer1 has signaling data, give it to peer2 somehow
+        peer2.signal(data)
+    })
+
+    peer2.on('signal', data => {
+        // when peer2 has signaling data, give it to peer1 somehow
+        peer1.signal(data)
+    })
+
+    peer1.on('connect', () => {
+        // wait for 'connect' event before using the data channel
+        peer1.send('hey peer2, how is it going?')
+    })
+
+    peer2.on('data', data => {
+        // got a data channel message
+        console.log('got a message from peer1: ' + data)
+    })
+*/
+
+
+    </script>
+  </body>
+</html>

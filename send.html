@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="ja">
+    <head>
+    <meta charset="UTF-8">
+    <title>webRTC</title>
+    </head>
+<body>
+    <style>
+        *{
+            margin:0;
+            padding:0;
+        }
+        html{
+            width:100%;
+            height:100%;
+        }
+        body{
+            width:100%;
+            height:100%;
+        }
+        #video{
+            width:640px;
+            height:360px;
+            display:none;
+        }
+        #statusConnection{
+
+        }
+        #btn_start{
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            -webkit-transform: translate(-50%, -50%);
+            transform: translate(-50%, -50%);
+        }
+    </style>
+    <b id="statusConnection">未接続</b>
+    <input type="button" value="デバイス検出" onclick="deviceGetList()">
+    <div><label>video：<select id="selectVideo"></select></label></div>
+    <div><label>audio：<select id="selectAudio"></select></label></div>
+    <input type="button" onclick="startCamera()" value="カメラ接続" id="btn_camera" disabled>
+
+    <video id="video" controls></video>
+    <script type="text/javascript" src="/socket.io/socket.io.js"></script>
+    <script src="https://stream.ikasekai.com/js/simplepeer.min.js"></script>
+    <script>
+    var initiator = true;
+    var socketReady = false;
+    var socket = io.connect();
+    var peerClient = null;
+    var broadcastStream = null;
+    var intervalConnection = null;
+    var selectAudio = document.querySelector("#selectAudio");
+    var selectVideo = document.querySelector("#selectVideo");
+    var buttonCameraConnect = document.querySelector("#btn_camera");
+    const listPeerConnection = {};
+    var url = new URL(document.location.href)
+    
+    socket.emit("client_to_server_join", {room : getRoomName() });
+    socket.emit("client_to_server_personal", {value : name});
+
+    // socket: channel connected
+    socket.on('connect', onOpened)
+          .on('server_to_client', onMessage);
+
+    function getRoomName() { // たとえば、 URLに  ?roomname  とする
+        var args = url.pathname.split('/');
+        console.log(args)
+        if (args.length > 1) {
+            var room = args[2];
+            if (room != "") {
+                return 'room' + room;
+            }
+        }
+        return "_defaultroom";
+    }
+
+    function onOpened(evt) {
+        console.log('socket opened.');
+        socketReady = true;
+        var roomname = getRoomName(); // 会議室名を取得する
+        socket.emit('enter', roomname);
+    }
+
+    function onMessage(evt) {
+        console.log(evt);
+        //document.querySelector('#outgoing').textContent = JSON.stringify(evt)
+        if(initiator){
+            if(evt.data.type=="call"){
+                
+                if(broadcastStream){
+                    socket.emit("client_to_server_to", evt.clientId, {type:'received'});
+                    listPeerConnection[evt.clientId] = createPeer(evt.clientId);
+                }
+            }else if(evt.data.type=="answer"){
+                listPeerConnection[evt.clientId].signal(evt.data)
+            }else if(evt.data.type=="leave"){
+                console.log('disconnect:' + evt.clientId);
+                delete listPeerConnection[evt.clientId]
+            }
+        }else{
+            if(evt.data.type=="received"){
+                clearInterval(intervalConnection);
+            }else if(evt.data.type=="offer"){
+                peerClient.signal(evt.data)
+            }
+        }
+    }
+
+    function startCallConnection(){
+        setStatus('-接続処理開始...');
+        document.querySelector('#btn_start').style.display = 'none'
+        let text = '▲接続中...'
+        intervalConnection = setInterval(function(){
+            if(socketReady){
+                console.log('try connect');
+                setStatus(text + '.')
+                callConnection();
+            }
+        },3000
+        );
+    }
+    function callConnection(){
+        if(peerClient == null){
+            peerClient = createPeer();
+        }
+        socket.emit("client_to_server_broadcast", {type:'call',clientId:socket.id});
+    }
+    function gotMedia(stream){
+        broadcastStream = stream;
+        
+//        buttonCameraConnect.disabled = true
+        var video = document.querySelector('#video');
+        video.muted = true;
+        video.style.display = 'block';
+        if ('srcObject' in video) {
+            video.srcObject = stream
+        } else {
+            video.src = window.URL.createObjectURL(stream) // for older browsers
+        }
+        
+        video.play()
+
+        for (let key in listPeerConnection) {
+            if(listPeerConnection[key]){
+                listPeerConnection[key].addStream(broadcastStream)
+            }else{
+                delete listPeerConnection[key]
+            }
+        }
+        
+    }
+
+    function startCamera(){
+        navigator.mediaDevices.getUserMedia({
+            video: {
+                deviceId:selectVideo.value,
+                width:1280,
+                height:720
+            },
+            audio: {
+                deviceId:selectAudio.value
+            }
+        }).then(gotMedia).catch(() => {})
+    }
+
+    function createPeer(socketSendTo){
+        let param = {
+            initiator: initiator,
+            trickle: false,
+            config:{iceServers: [{ urls: 'stun:stream.ikasekai.com:3478' },]}
+        }
+        if(broadcastStream){
+            param.stream = broadcastStream;
+        }
+        let peerClient = new SimplePeer(param)
+
+        peerClient.on('error', err => console.log('error', err))
+
+        peerClient.on('signal', data => {
+            console.log('SIGNAL', JSON.stringify(data));
+            if(socketSendTo){
+                // 特定socketに送信
+                socket.emit("client_to_server_to", socketSendTo, data);
+            }else{
+                // Room全体に送信
+                socket.emit("client_to_server_broadcast", data);
+            }
+            
+            //socket.to(clientId).emit('client_to_server_broadcast', data);
+            //document.querySelector('#outgoing').textContent = JSON.stringify(data)
+        })
+
+        
+
+
+        peerClient.on('connect', () => {
+            console.log('CONNECT')
+            setStatusConnect();
+            peerClient.send('whatever' + Math.random())
+        })
+
+        peerClient.on('data', data => {
+            console.log('data: ' + data)
+        })
+        
+        if(!initiator){
+            peerClient.on('stream', stream => {
+                // got remote video stream, now let's show it in a video tag
+                var video = document.querySelector('#video')
+
+                if ('srcObject' in video) {
+                    video.srcObject = stream
+                } else {
+                    video.src = window.URL.createObjectURL(stream) // for older browsers
+                }
+                video.addEventListener('canplay', function() {
+                    video.play()
+                });
+
+            })
+        }
+
+
+
+        return peerClient;
+    }
+
+    function setStatusConnect(){
+        setStatus('●接続済み');
+        
+    }
+    function setStatus(text){
+        document.querySelector('#statusConnection').innerHTML = text;
+    }
+
+    function deviceGetList() {
+        deviceClearList();
+        navigator.mediaDevices.enumerateDevices().then(
+            function(devices) {
+                devices.forEach(
+                    function(device) {
+                        console.log(device.kind + ": " + device.label +
+                        " id = " + device.deviceId);
+                        deviceAdd(device);
+                    }
+                );
+            }
+        ).catch(
+            function(err) {
+                console.error('enumerateDevide ERROR:', err);
+            }
+        );
+        buttonCameraConnect.disabled = false
+    }
+    function deviceClearList(){
+        selectAudio.innerHTML = '';
+        selectVideo.innerHTML = '';
+    }
+    function deviceAdd(device) {
+        if (device.kind === 'audioinput') {
+            var id = device.deviceId;
+            var label = device.label || 'microphone';
+            var option = document.createElement('option');
+            option.setAttribute('value', id);
+            option.innerHTML = label;
+            selectAudio.appendChild(option);
+            console.log(label, id);
+        }
+        else if (device.kind === 'videoinput') {
+            var id = device.deviceId;
+            var label = device.label || 'camera';
+
+            var option = document.createElement('option');
+            option.setAttribute('value', id);
+            option.innerHTML = label;
+            selectVideo.appendChild(option);
+            console.log(label, id);
+        }else if(device.kind === 'audiooutput') {
+        }
+        else {
+            console.error('UNKNOWN Device kind:' + device.kind);
+        }
+    }
+    deviceGetList()
+    </script>
+  </body>
+</html>
